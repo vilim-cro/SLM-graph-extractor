@@ -1,18 +1,18 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments
 from datasets import Dataset
 import torch
-from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
+from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model, PeftModel
 from functools import partial
+import json
+import os
+
+with open("instructions.txt") as f:
+    instructions = f.read()
 
 def test_model(model, tokenizer, test_examples, device):
     model.eval()
     for example in test_examples:
-        instruction = """
-        Extract entities and relations from the following sentence.
-        Example input: Emma borrowed a pen from Liam.
-        Entities: [Emma, Liam, pen]; Relations: [(Emma, borrowed, pen), (pen, from, Liam)].
-        Now do this for the following sentence: """
-        input_text = instruction + example
+        input_text = instructions + "Input: " + example + "\nOutput: "
         
         inputs = tokenizer(input_text, return_tensors="pt", padding=True, truncation=True, max_length=512)
         input_ids = inputs["input_ids"].to(device)
@@ -23,7 +23,7 @@ def test_model(model, tokenizer, test_examples, device):
                 output_ids = model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    max_length=200,
+                    max_length=400,
                     num_beams=4,
                     no_repeat_ngram_size=3,
                     num_return_sequences=1,
@@ -46,11 +46,9 @@ def test_model(model, tokenizer, test_examples, device):
 def tokenize_function(examples, tokenizer):
     # Create prompt template for each example
     prompts = [
-        f"""Extract entities and relations from the following sentence.
-        Example input: Emma borrowed a pen from Liam.
-        Entities: [Emma, Liam, pen]; Relations: [(Emma, borrowed, pen), (pen, from, Liam)].
-        Now do this for the following sentence: {input_text}"""
-        for input_text in examples["input_text"]
+        instructions + "Input: " + example + "\nOutput: "
+        # instructions + input_text
+        for example in examples["input_text"]
     ]
     
     # Tokenize inputs
@@ -77,29 +75,58 @@ def tokenize_function(examples, tokenizer):
     
     return model_inputs
 
-def main():
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+def save_model(model, tokenizer, output_dir):
+    """Save the model and tokenizer"""
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Saving model to {output_dir}")
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
+def load_model(base_model_name, adapter_path, custom_cache_dir):
+    """Load a fine-tuned model with its adapter weights"""
+    print(f"Loading base model {base_model_name}")
     
-    # Define custom cache directory
-    custom_cache_dir = "/dtu/blackhole/09/214057/llama"
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name, cache_dir=custom_cache_dir)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     
-    # Load tokenizer and model
-    model_name = "meta-llama/Llama-3.2-3B-Instruct"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=custom_cache_dir)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
         cache_dir=custom_cache_dir,
         device_map="auto",
         torch_dtype=torch.float16,
         load_in_8bit=True
     )
+    base_model.config.pad_token_id = tokenizer.pad_token_id
     
-    # Set special tokens
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        model.config.pad_token_id = tokenizer.pad_token_id
+    if adapter_path and os.path.exists(adapter_path):
+        print(f"Loading adapter weights from {adapter_path}")
+        model = PeftModel.from_pretrained(
+            base_model,
+            adapter_path,
+            device_map="auto"
+        )
+    else:
+        model = base_model
+        
+    model.generation_config.temperature=None
+    model.generation_config.top_p=None
+    return model, tokenizer
+
+def main():
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Define paths and configurations
+    custom_cache_dir = "/dtu/blackhole/09/214057/llama"
+    model_name = "meta-llama/Llama-3.2-3B-Instruct"
+    output_dir = "./results"
+    final_adapter_dir = os.path.join(output_dir, "final_lora_adapter")
+    
+    # Load model and tokenizer
+    model, tokenizer = load_model(model_name, None, custom_cache_dir)
     
     # Prepare model for k-bit training
     model = prepare_model_for_kbit_training(model)
@@ -111,7 +138,7 @@ def main():
         target_modules=["q_proj", "v_proj"],
         lora_dropout=0.05,
         bias="none",
-        task_type="CAUSAL_LM"
+        task_type="CAUSAL_LM",
     )
     
     # Add LoRA adapters
@@ -119,70 +146,27 @@ def main():
     print("Trainable parameters:")
     model.print_trainable_parameters()
     
-    # Define training data
-    data = {
-        "input_text": [
-            "Sophia handed the keys to Noah.",
-            "Mason gave Olivia a bouquet of flowers.",
-            "Ella sent a package to Lucas.",
-            "Isabella returned a book to Ethan.",
-            "James brought Ava a coffee.",
-            "Mia wrote a letter to Benjamin.",
-            "Charlotte gifted a painting to Henry.",
-            "Amelia showed a map to Alexander.",
-            "Logan explained the project to Harper.",
-            "Lily delivered a message to Jack.",
-            "Evelyn sold a car to Daniel.",
-            "Grace taught a lesson to Samuel.",
-            "Scarlett handed a folder to Leo.",
-            "Zoey passed a note to Elijah.",
-            "Chloe introduced William to Layla.",
-            "Aria gave a speech to David.",
-            "Hannah read a story to Gabriel.",
-            "Violet showed a picture to Owen.",
-            "Aurora prepared a meal for Michael."
-        ],
-        "target_text": [
-            "Entities: [Sophia, Noah, keys]; Relations: [(Sophia, handed, keys), (keys, to, Noah)]",
-            "Entities: [Mason, Olivia, bouquet]; Relations: [(Mason, gave, bouquet), (bouquet, to, Olivia)]",
-            "Entities: [Ella, Lucas, package]; Relations: [(Ella, sent, package), (package, to, Lucas)]",
-            "Entities: [Isabella, Ethan, book]; Relations: [(Isabella, returned, book), (book, to, Ethan)]",
-            "Entities: [James, Ava, coffee]; Relations: [(James, brought, coffee), (coffee, to, Ava)]",
-            "Entities: [Mia, Benjamin, letter]; Relations: [(Mia, wrote, letter), (letter, to, Benjamin)]",
-            "Entities: [Charlotte, Henry, painting]; Relations: [(Charlotte, gifted, painting), (painting, to, Henry)]",
-            "Entities: [Amelia, Alexander, map]; Relations: [(Amelia, showed, map), (map, to, Alexander)]",
-            "Entities: [Logan, Harper, project]; Relations: [(Logan, explained, project), (project, to, Harper)]",
-            "Entities: [Lily, Jack, message]; Relations: [(Lily, delivered, message), (message, to, Jack)]",
-            "Entities: [Evelyn, Daniel, car]; Relations: [(Evelyn, sold, car), (car, to, Daniel)]",
-            "Entities: [Grace, Samuel, lesson]; Relations: [(Grace, taught, lesson), (lesson, to, Samuel)]",
-            "Entities: [Scarlett, Leo, folder]; Relations: [(Scarlett, handed, folder), (folder, to, Leo)]",
-            "Entities: [Zoey, Elijah, note]; Relations: [(Zoey, passed, note), (note, to, Elijah)]",
-            "Entities: [Chloe, William, Layla]; Relations: [(Chloe, introduced, William), (William, to, Layla)]",
-            "Entities: [Aria, David, speech]; Relations: [(Aria, gave, speech), (speech, to, David)]",
-            "Entities: [Hannah, Gabriel, story]; Relations: [(Hannah, read, story), (story, to, Gabriel)]",
-            "Entities: [Violet, Owen, picture]; Relations: [(Violet, showed, picture), (picture, to, Owen)]",
-            "Entities: [Aurora, Michael, meal]; Relations: [(Aurora, prepared, meal), (meal, for, Michael)]"
-        ]
-    }
+    # Load and prepare training data
+    with open('data.json', 'r') as f:
+        data = json.load(f)
     
-    # Create dataset and tokenize
     dataset = Dataset.from_dict(data)
     tokenized_dataset = dataset.map(
-        partial(tokenize_function, tokenizer=tokenizer),  # Pass tokenizer to the function
+        partial(tokenize_function, tokenizer=tokenizer),
         batched=True,
         remove_columns=dataset.column_names
     )
     
     # Define training arguments
     training_args = TrainingArguments(
-        output_dir="./results",
+        output_dir=output_dir,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         num_train_epochs=3,
         logging_dir="./logs",
         logging_steps=10,
         report_to="none",
-        learning_rate=2e-4,
+        learning_rate=2e-5,
         warmup_steps=100,
         save_strategy="epoch",
         evaluation_strategy="no",
@@ -197,21 +181,32 @@ def main():
         train_dataset=tokenized_dataset,
     )
     
-    # Test before training
-    print("\nTesting before training:")
+    # Test examples
     test_examples = [
         "Alice gave Bob a book.",
-        "John sent an email to Mary."
+        "Violet showed Owen a picture of their family and an album filled with old memories.",
+        "Aurora prepared a three-course meal for Michael, including a special dessert with candles."
     ]
+    
+    # Test before training
+    print("\nTesting before training:")
     test_model(model, tokenizer, test_examples, device)
     
     # Train the model
     print("\nStarting training...")
     trainer.train()
     
+    # Save the final model and adapter weights
+    print("\nSaving final model...")
+    save_model(trainer.model, tokenizer, final_adapter_dir)
+    
+    # Load the fine-tuned model for testing
+    print("\nLoading fine-tuned model for testing...")
+    fine_tuned_model, _ = load_model(model_name, final_adapter_dir, custom_cache_dir)
+    
     # Test after training
     print("\nTesting after training:")
-    test_model(model, tokenizer, test_examples, device)
+    test_model(fine_tuned_model, tokenizer, test_examples, device)
 
 if __name__ == "__main__":
     main()
