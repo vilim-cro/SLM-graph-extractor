@@ -26,15 +26,22 @@ tokenizer = AutoTokenizer.from_pretrained(model_id, add_eos_token=True, cache_di
 
 dataset = load_dataset("Babelscape/SREDFM", "en", cache_dir="SLM/datasets", trust_remote_code=True)
 
-def remove_numeric_ids(example):
-    # Remove the 'uri' field from all entities
+def remove_extra_columns(example):
     example["entities"] = [
-        {key: value for key, value in entity.items() if key == "surfaceform"}
+        entity["surfaceform"]
         for entity in example["entities"]
-    ]    
+    ]
+    example["relations"] = [
+        {
+            "subject": example["entities"][relation["subject"]],
+            "predicate": relation["predicate"],
+            "object": example["entities"][relation["object"]],
+        }
+        for relation in example["relations"]
+    ]
     return example
 
-cleaned_dataset = dataset.map(remove_numeric_ids)
+cleaned_dataset = dataset.map(remove_extra_columns)
 print(cleaned_dataset["test"][0])
 
 def generate_prompt(data_point):
@@ -50,7 +57,8 @@ def generate_prompt(data_point):
     # Task instruction asking to extract entities and relations
     task_instruction = (
         "Given the following text, identify and extract all entities and their relations. "
-        "Entities could be people, organizations, locations, etc., and relations could be actions, associations, etc. I want you to ignore the URI field in the entities."
+        "Entities could be people, organizations, locations, etc., .I want you to foucs on surfaceform only in the entities."
+        "and relations could be actions, associations, etc"
     )
     
     # Formatted prompt incorporating the data point text
@@ -72,7 +80,7 @@ text_column = [generate_prompt(data_point) for data_point in cleaned_dataset['te
 cleaned_dataset['test'] = cleaned_dataset['test'].add_column("prompt", text_column)
 test_data = cleaned_dataset['test'].to_pandas()
 
-print(train_data['prompt'][0])
+print(train_data['prompt'])
 
 model.gradient_checkpointing_enable()
 model = prepare_model_for_kbit_training(model)
