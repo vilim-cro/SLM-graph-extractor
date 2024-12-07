@@ -26,53 +26,90 @@ tokenizer = AutoTokenizer.from_pretrained(model_id, add_eos_token=True, cache_di
 
 dataset = load_dataset("Babelscape/SREDFM", "en", cache_dir="SLM/datasets", trust_remote_code=True)
 
-def remove_numeric_ids(example):
-    # Remove the 'uri' field from all entities
+def remove_extra_columns(example):
     example["entities"] = [
-        {key: value for key, value in entity.items() if key == "surfaceform"}
+        entity["surfaceform"]
         for entity in example["entities"]
-    ]    
+    ]
+    example["relations"] = [
+        {
+            "subject": example["entities"][relation["subject"]],
+            "predicate": relation["predicate"],
+            "object": example["entities"][relation["object"]],
+        }
+        for relation in example["relations"]
+    ]
     return example
 
-cleaned_dataset = dataset.map(remove_numeric_ids)
+cleaned_dataset = dataset.map(remove_extra_columns)
 print(cleaned_dataset["test"][0])
 
 def generate_prompt(data_point):
     """
-    Generate input text based on a prompt, task instruction, context info, and answer.
-
-    :param data_point: dict: Data point from the Babelscape SREDFM dataset
-    :return: str: Formatted prompt text
+    Generate the input text based on the task instruction and raw text only.
+    Excludes answers (entities and relations) from the prompt.
     """
-    prefix_text = 'Below is an instruction that describes a task. Write a response that ' \
-                  'appropriately completes the request.\n\n'
+    prefix_text = 'Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n'
 
-    # Task instruction asking to extract entities and relations
     task_instruction = (
         "Given the following text, identify and extract all entities and their relations. "
-        "Entities could be people, organizations, locations, etc., and relations could be actions, associations, etc. I want you to ignore the URI field in the entities."
+        "Entities could be people, organizations, locations, etc., and relations could be actions, associations, etc."
     )
-    
-    # Formatted prompt incorporating the data point text
-    text = (
-        f"{prefix_text} {task_instruction}\n\n"
+
+    # Prompt includes only instruction and text
+    prompt = (
+        f"{prefix_text}{task_instruction}\n\n"
         f"Text: {data_point['text']}\n\n"
-        "Entities and Relations:\n"
-        f"Entities: {data_point['entities']}\n"
-        f"Relations: {data_point['relations']}\n"
+        "Entities and Relations:"
     )
 
-    return text
+    return prompt
 
-text_column = [generate_prompt(data_point) for data_point in cleaned_dataset['train']]
-cleaned_dataset['train'] = cleaned_dataset['train'].add_column("prompt", text_column)
-train_data = cleaned_dataset['train'].to_pandas()
+def generate_labels(data_point):
+    """
+    Convert entities and relations to the expected output text format.
+    """
+    entities = ", ".join([f'"{entity}"' for entity in data_point['entities']])
+    relations = "\n".join([
+        f'{{"subject": "{relation["subject"]}", "predicate": "{relation["predicate"]}", "object": "{relation["object"]}"}}'
+        for relation in data_point['relations']
+    ])
 
-text_column = [generate_prompt(data_point) for data_point in cleaned_dataset['test']]
-cleaned_dataset['test'] = cleaned_dataset['test'].add_column("prompt", text_column)
-test_data = cleaned_dataset['test'].to_pandas()
+    labels = f"Entities: [{entities}]\nRelations:\n{relations}"
+    return labels
 
-print(train_data['prompt'][0])
+def preprocess_dataset(dataset):
+    dataset = dataset.map(lambda dp: {
+        "prompt": generate_prompt(dp),
+        "labels": generate_labels(dp)
+    })
+    return dataset
+
+processed_dataset = preprocess_dataset(cleaned_dataset)
+
+def tokenize_function(data_point):
+    tokenized_input = tokenizer(
+        data_point["prompt"],
+        truncation=True,
+        padding="max_length",
+        max_length=512
+    )
+    tokenized_labels = tokenizer(
+        data_point["labels"],
+        truncation=True,
+        padding="max_length",
+        max_length=512
+    )
+
+    return {
+        "input_ids": tokenized_input["input_ids"],
+        "attention_mask": tokenized_input["attention_mask"],
+        "labels": tokenized_labels["input_ids"]
+    }
+
+tokenized_dataset = processed_dataset.map(tokenize_function, batched=True)
+
+print(tokenized_dataset["test"][0])
 
 model.gradient_checkpointing_enable()
 model = prepare_model_for_kbit_training(model)
@@ -113,8 +150,8 @@ torch.cuda.empty_cache()
 # Create SFTConfig
 trainer = SFTTrainer(
     model=model,
-    train_dataset=cleaned_dataset['train'],
-    eval_dataset=cleaned_dataset['test'],
+    train_dataset=tokenized_dataset['train'],
+    eval_dataset=tokenized_dataset['test'],
     dataset_text_field="prompt",
     peft_config=lora_config,
     args=transformers.TrainingArguments(
@@ -134,7 +171,7 @@ trainer = SFTTrainer(
 model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
 trainer.train()
 
-new_model = "mistral-Code-Instruct-Finetune-test"
+new_model = "gemma7b_finetuned"
 trainer.model.save_pretrained(new_model)
 
 base_model = AutoModelForCausalLM.from_pretrained(
@@ -157,36 +194,3 @@ tokenizer.padding_side = "right"
 
 merged_model.push_to_hub(new_model, use_temp_dir=False)
 tokenizer.push_to_hub(new_model, use_temp_dir=False)
-
-#####################################################################################################
-# def get_completion(query: str, model, tokenizer) -> str:
-#     # Define the prompt template
-#     prompt_template = """
-#     <start_of_turn>user
-#     Generate entities and relations for the query.
-#     {query}
-#     <end_of_turn>\n<start_of_turn>model
-#     """
-#     # Format the prompt
-#     prompt = prompt_template.format(query=query)
-
-#     # Tokenize the input
-#     encodeds = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
-
-#     # Move input tensors to the same device as the model
-#     encodeds = {key: value.to("cpu") for key, value in encodeds.items()}
-
-#     # Generate predictions
-#     generated_ids = model.generate(
-#         **encodeds, 
-#         max_new_tokens=1000, 
-#         do_sample=True, 
-#         pad_token_id=tokenizer.eos_token_id
-#     )
-
-#     # Decode the output
-#     decoded = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-#     return decoded
-
-# result = get_completion(query="Marie Curie, born in 1867, was a Polish and naturalised-French physicist and chemist who conducted pioneering research on radioactivity.", model=merged_model, tokenizer=tokenizer)
-# print(result)
