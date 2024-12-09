@@ -1,5 +1,12 @@
 import re
-from typing import Callable
+
+replacements = [
+    ("'Non", "Non"),
+    ("[\"\"The First Celestial", "\"\"The First Celestial"),
+    ("[\"\"The Silent Serin", "\"\"The Silent Serin"),
+    ("[\"\"The Untuned Ventriloquist", "\"\"The Untuned Ventriloquist"),
+    ("[\"\"The Cannibal Manifesto in the Dark", "\"\"The Cannibal Manifesto in the Dark")
+]
 
 def parse_gemma_output(file_path: str) -> dict:
     with open(file_path, encoding='utf-8') as f:
@@ -7,18 +14,19 @@ def parse_gemma_output(file_path: str) -> dict:
 
     # Clean ' from the data
     data = re.sub(r"([a-zA-Z0-9])'([a-zA-Z0-9\s-])", r"\1\2", data)
-    data = data.replace("'Non", "Non")
+    for replacement in replacements:
+        data = data.replace(replacement[0], replacement[1])
     sections = data.split('[')
     all_entities = []
     all_relations = []
     skip = 0
     first_section = True
     for s in sections[1:]:
-        if s[:1] == "{" or s[:1].isalnum() or s[:1] == ".":
+        if s[:1] == "{" or s[:1].isalnum() or s[:1] in ".=":
             if s[:1] == "{":
                 skip += 1
-            if not s[:1].isalnum() and s[:1] != "." and s[:1] != "{":
-                print(s[:5])
+            if not s[:1].isalnum() and not s[:1] in ".=" and s[:1] != "{":
+                print(s)
             continue
 
         # Handle cases where model didnt generate anything

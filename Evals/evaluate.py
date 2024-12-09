@@ -62,10 +62,13 @@ def evaluate(true_nodes: list, predicted_nodes: list, true_relations: dict, pred
     true_embeddings = model.encode(true_relations_text)
     pred_embeddings = model.encode(predicted_relations_text)
 
-    aligned_similarity = cosine_similarity(true_embeddings, pred_embeddings)
-    aligned_similarity = [max(row) for row in aligned_similarity]
+    if len(pred_embeddings) > 0:
+        aligned_similarity = cosine_similarity(true_embeddings, pred_embeddings)
+        aligned_similarity = [max(row) for row in aligned_similarity]
 
-    aligned_similarity_mean = sum(aligned_similarity) / len(aligned_similarity)
+        aligned_similarity_mean = sum(aligned_similarity) / len(aligned_similarity)
+    else:
+        aligned_similarity_mean = 0
 
     metrics["aligned_similarity"] = aligned_similarity_mean
 
@@ -75,11 +78,12 @@ def evaluate(true_nodes: list, predicted_nodes: list, true_relations: dict, pred
     return {'node_score': metrics['node_f1'], 'relations_score': relations_score}
 
 if __name__ == "__main__":
-    limit = 5
+    start = 0
+    end = 1000
     test_dataset = load_dataset("Babelscape/SREDFM", "en", split="test", trust_remote_code=True)
     test_dataset = test_dataset.map(remove_extra_columns)
-    entities = test_dataset["entities"][:limit]
-    relations = test_dataset["relations"][:limit]
+    entities = test_dataset["entities"][start:end]
+    relations = test_dataset["relations"][start:end]
 
     to_parse = [
         ("../Outputs/gemma2b_entities_relations.csv", parse_gemma_output, "Gemma 2b"),
@@ -93,7 +97,7 @@ if __name__ == "__main__":
         results = parser(file_path)
         # print(len(entities), len(relations), len(results['entities']), len(results['relations']))
         for true_entities, true_relations, pred_entities, pred_relations in zip(
-            entities, relations, results['entities'][:limit], results['relations'][:limit]
+            entities, relations, results['entities'][start:end], results['relations'][start:end]
             ):
             scores = evaluate(true_entities, pred_entities, true_relations, pred_relations)
             node_scores.append(scores['node_score'])
