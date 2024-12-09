@@ -26,7 +26,7 @@ def load_model_and_tokenizer(model_id, cache_dir):
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16  # Specify the Liger kernel
+        bnb_4bit_compute_dtype=torch.bfloat16
     )
     model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=bnb_config, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_id, add_eos_token=True, cache_dir=cache_dir)
@@ -74,8 +74,8 @@ def find_all_linear_names(model):
 def main():
     check_cuda()
     
-    model_id = "google/gemma-2b-it"
-    cache_dir = "SLM/gemma2b"  # Specify an alternative cache directory
+    model_id = "google/gemma-7b-it"
+    cache_dir = "SLM/gemma7b"  # Specify an alternative cache directory
     dataset_name = "Babelscape/SREDFM"
     
     model, tokenizer = load_model_and_tokenizer(model_id, cache_dir)
@@ -131,7 +131,7 @@ def main():
     model.config.use_cache = False
     trainer.train()
     
-    new_model = "gemma2b-trained"
+    new_model = "gemma7b-trained"
     trainer.model.save_pretrained(new_model)
     
     base_model = AutoModelForCausalLM.from_pretrained(
@@ -140,14 +140,14 @@ def main():
         return_dict=True,
         torch_dtype=torch.float16,
         device_map={"": 0},
-        cache_dir="SLM/gemma2b_trained"  # Specify an alternative cache directory
+        cache_dir="SLM/gemma7b_trained"  # Specify an alternative cache directory
     )
     merged_model = PeftModel.from_pretrained(base_model, new_model)
     merged_model = merged_model.merge_and_unload()
     
     merged_model.to("cpu")
-    tokenizer.save_pretrained("gemma2b_trained")
-    merged_model.save_pretrained("gemma2b_trained", safe_serialization=True)
+    tokenizer.save_pretrained("gemma7b_trained")
+    merged_model.save_pretrained("gemma7b_trained", safe_serialization=True)
     
     merged_model.push_to_hub(new_model, use_temp_dir=False)
     tokenizer.push_to_hub(new_model, use_temp_dir=False)
